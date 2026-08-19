@@ -7,6 +7,8 @@ from kivy.uix.label import Label
 from kivy.uix.image import AsyncImage
 from kivy.clock import mainthread
 from kivy.core.window import Window
+from kivy.logger import Logger
+import hashlib
 import os
 import requests
 import threading
@@ -75,8 +77,9 @@ class DetailView(BoxLayout):
     def update(self, recipe):
         # ask the app cache for a local image path (downloads in background if missing)
         app = App.get_running_app()
+        cache = app.cache if app is not None else None
         img_url = recipe.get('image_url') or ''
-        if img_url and app.cache is not None:
+        if img_url and cache is not None:
             # provide a callback to set the image when cached or fallback to remote URL
             def cb(local_path):
                 if local_path:
@@ -84,7 +87,7 @@ class DetailView(BoxLayout):
                 else:
                     self.image.source = img_url
 
-            app.cache.get_image(img_url, cb)
+            cache.get_image(img_url, cb)
         else:
             self.image.source = img_url
 
@@ -96,14 +99,24 @@ class DetailView(BoxLayout):
 
 
 class RecettesApp(App):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.cache = None
+
     def build(self):
         Window.clearcolor = (1, 1, 1, 1)
         root = BoxLayout(orientation='horizontal', spacing=8, padding=8)
 
-        # prepare cache directory and manager
-        ud = getattr(self, 'user_data_dir', None)
-        base = os.path.join(ud, 'cache') if ud else None
-        self.cache = ImageCache(base_dir=base)
+        # prepare cache directory and manager; without a usable cache the app
+        # still works by loading images directly from their remote URL
+        base = os.path.join(self.user_data_dir, 'cache') if self.user_data_dir else None
+        try:
+            self.cache = ImageCache(base_dir=base)
+        except OSError as exc:
+            Logger.warning(
+                'Recettes: cache d\'images indisponible (%s), lecture directe depuis le réseau', exc
+            )
+            self.cache = None
 
         left = BoxLayout(orientation='vertical', size_hint_x=0.36)
         lbl = Label(text='Recettes', size_hint_y=None, height=36)
@@ -125,6 +138,8 @@ class RecettesApp(App):
         return root
 
     def show_recipe(self, idx):
+        if not 0 <= idx < len(RECIPES):
+            raise IndexError(f'Index de recette invalide: {idx}')
         recipe = RECIPES[idx]
         self.detail.update(recipe)
 
@@ -137,59 +152,70 @@ class ImageCache:
     def __init__(self, base_dir=None):
         # base_dir will be set later when App is running; use a temp fallback
         self.base_dir = base_dir or os.path.join(os.getcwd(), 'cache_images')
-        os.makedirs(self.base_dir, exist_ok=True)
+        self.images_dir = os.path.join(self.base_dir, 'images')
+        os.makedirs(self.images_dir, exist_ok=True)
 
     def _filename_for_url(self, url: str) -> str:
         parsed = urlparse(url)
         name = os.path.basename(parsed.path)
-        if not name:
-            name = 'img'
-        return name
+        digest = hashlib.sha1(url.encode('utf-8')).hexdigest()[:10]
+        return f'{digest}_{name}' if name else digest
+
+    @staticmethod
+    def _call_on_main_thread(callback, value):
+        @mainthread
+        def _cb():
+            callback(value)
+
+        _cb()
 
     def get_image(self, url: str, callback):
-        # compute local path
-        fname = self._filename_for_url(url)
-        local_dir = os.path.join(self.base_dir, 'images')
-        os.makedirs(local_dir, exist_ok=True)
-        local_path = os.path.join(local_dir, fname)
+        """Appelle callback(local_path) une fois l'image en cache, callback(None) sinon.
+
+        Le callback est toujours invoqué exactement une fois sur le thread
+        principal, y compris lorsque le téléchargement échoue.
+        """
+        local_path = os.path.join(self.images_dir, self._filename_for_url(url))
 
         if os.path.exists(local_path):
-            # immediate callback on main thread
-            from kivy.clock import mainthread
-
-            @mainthread
-            def _cb():
-                callback(local_path)
-
-            _cb()
+            self._call_on_main_thread(callback, local_path)
             return
 
-        # otherwise download in background
-        def _download():
-            try:
-                resp = requests.get(url, stream=True, timeout=20)
-                resp.raise_for_status()
-                with open(local_path + '.tmp', 'wb') as f:
-                    for chunk in resp.iter_content(1024):
-                        f.write(chunk)
-                os.replace(local_path + '.tmp', local_path)
-                from kivy.clock import mainthread
+        threading.Thread(
+            target=self._download, args=(url, local_path, callback), daemon=True
+        ).start()
 
-                @mainthread
-                def _cb():
-                    callback(local_path)
+    def _download(self, url: str, local_path: str, callback):
+        tmp_path = local_path + '.tmp'
+        try:
+            resp = requests.get(url, stream=True, timeout=20)
+            resp.raise_for_status()
+            with open(tmp_path, 'wb') as f:
+                for chunk in resp.iter_content(1024):
+                    f.write(chunk)
+            os.replace(tmp_path, local_path)
+        except (requests.RequestException, OSError) as exc:
+            Logger.warning('Recettes: téléchargement de %s échoué: %s', url, exc)
+            self._remove_partial_file(tmp_path)
+            self._call_on_main_thread(callback, None)
+            return
+        except BaseException:
+            # ne jamais laisser le callback en attente si une erreur inattendue
+            # survient dans ce thread d'arrière-plan
+            Logger.exception('Recettes: erreur inattendue en téléchargeant %s', url)
+            self._remove_partial_file(tmp_path)
+            self._call_on_main_thread(callback, None)
+            raise
+        self._call_on_main_thread(callback, local_path)
 
-                _cb()
-            except Exception:
-                from kivy.clock import mainthread
-
-                @mainthread
-                def _cb():
-                    callback(None)
-
-                _cb()
-
-        threading.Thread(target=_download, daemon=True).start()
+    @staticmethod
+    def _remove_partial_file(path: str):
+        if not os.path.exists(path):
+            return
+        try:
+            os.remove(path)
+        except OSError as exc:
+            Logger.warning('Recettes: fichier temporaire %s non supprimé: %s', path, exc)
 
 
 if __name__ == '__main__':
