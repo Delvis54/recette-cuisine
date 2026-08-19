@@ -1,9 +1,24 @@
+import logging
 import os
-import requests
-import io
 import tkinter as tk
 from tkinter import ttk, messagebox
-from PIL import Image, ImageTk
+from typing import Optional
+
+MISSING_DEPENDENCIES = []
+
+try:
+    import requests
+except ImportError:
+    requests = None
+    MISSING_DEPENDENCIES.append("requests")
+
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = ImageTk = None
+    MISSING_DEPENDENCIES.append("Pillow")
+
+logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
 # Données : 10 recettes africaines (liste de dictionnaires)
@@ -89,9 +104,17 @@ RECIPES = [
 ]
 
 IMAGES_DIR = os.path.join(os.path.dirname(__file__), "images")
-os.makedirs(IMAGES_DIR, exist_ok=True)
 
 # Helpers
+
+
+def ensure_images_dir() -> None:
+    """Create the image cache directory, raising OSError with context on failure."""
+    try:
+        os.makedirs(IMAGES_DIR, exist_ok=True)
+    except OSError as exc:
+        raise OSError(f"Impossible de créer le dossier d'images {IMAGES_DIR}: {exc}") from exc
+
 
 def slugify(name: str) -> str:
     return "".join(c for c in name.lower() if c.isalnum() or c == " ").replace(" ", "_")
@@ -103,31 +126,58 @@ def local_image_path(recipe: dict) -> str:
 
 
 def download_image(url: str, path: str) -> bool:
+    """Télécharge une image; retourne False et journalise l'erreur en cas d'échec.
+
+    L'écriture passe par un fichier temporaire afin de ne jamais laisser un
+    fichier partiel dans le cache.
+    """
+    if requests is None:
+        logger.warning("Téléchargement impossible pour %s: 'requests' n'est pas installé", url)
+        return False
+
+    tmp_path = path + ".tmp"
     try:
         resp = requests.get(url, stream=True, timeout=15)
         resp.raise_for_status()
-        with open(path, "wb") as f:
+        with open(tmp_path, "wb") as f:
             for chunk in resp.iter_content(1024):
                 f.write(chunk)
+        os.replace(tmp_path, path)
         return True
-    except Exception as e:
-        print(f"Téléchargement échoué pour {url}: {e}")
+    except (requests.RequestException, OSError) as exc:
+        logger.warning("Téléchargement échoué pour %s: %s", url, exc)
         return False
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError as exc:
+                logger.warning("Fichier temporaire %s non supprimé: %s", tmp_path, exc)
 
 
-def ensure_image(recipe: dict) -> str:
+def make_placeholder_image() -> "Image.Image":
+    return Image.new("RGB", (800, 600), (200, 200, 200))
+
+
+def ensure_image(recipe: dict) -> Optional[str]:
+    """Retourne le chemin local de l'image, ou None si aucune image utilisable."""
+    try:
+        ensure_images_dir()
+    except OSError as exc:
+        logger.warning("%s", exc)
+        return None
     path = local_image_path(recipe)
     if os.path.exists(path):
         return path
-    # essayer de télécharger
     url = recipe.get("image_url")
-    if url:
-        ok = download_image(url, path)
-        if ok:
-            return path
+    if url and download_image(url, path):
+        return path
     # fallback : créer une image placeholder
-    placeholder = Image.new("RGB", (800, 600), (200, 200, 200))
-    placeholder.save(path, "JPEG")
+    try:
+        make_placeholder_image().save(path, "JPEG")
+    except OSError as exc:
+        logger.warning("Création de l'image placeholder %s échouée: %s", path, exc)
+        return None
     return path
 
 
@@ -198,12 +248,23 @@ class RecipeApp(tk.Tk):
 
     def _load_images(self):
         for idx, r in enumerate(self.recipes):
-            path = ensure_image(r)
+            self.pil_images[idx] = self._load_image(r)
+
+    def _load_image(self, recipe: dict) -> "Image.Image":
+        path = ensure_image(recipe)
+        if path is None:
+            return make_placeholder_image()
+        try:
+            return Image.open(path).convert("RGB")
+        except (OSError, ValueError) as exc:
+            logger.warning("Image illisible %s (%s): utilisation du placeholder", path, exc)
+            # le fichier en cache est corrompu : on le retire pour permettre un
+            # nouveau téléchargement au prochain démarrage
             try:
-                img = Image.open(path).convert("RGB")
-            except Exception:
-                img = Image.new("RGB", (800, 600), (200, 200, 200))
-            self.pil_images[idx] = img
+                os.remove(path)
+            except OSError as remove_exc:
+                logger.warning("Image corrompue %s non supprimée: %s", path, remove_exc)
+            return make_placeholder_image()
 
     def _on_select(self, event):
         sel = event.widget.curselection()
@@ -213,6 +274,8 @@ class RecipeApp(tk.Tk):
         self.show_recipe(idx)
 
     def show_recipe(self, idx: int):
+        if not 0 <= idx < len(self.recipes):
+            raise IndexError(f"Index de recette invalide: {idx}")
         r = self.recipes[idx]
         # ingrédients
         self.ing_text.configure(state="normal")
@@ -242,22 +305,43 @@ class RecipeApp(tk.Tk):
         h = int(self.winfo_height() * 0.4) or 300
         # maintain aspect ratio
         img = pil_img.copy()
-        img.thumbnail((w, h), Image.LANCZOS)
-        tk_img = ImageTk.PhotoImage(img)
+        try:
+            img.thumbnail((w, h), Image.LANCZOS)
+            tk_img = ImageTk.PhotoImage(img)
+        except (OSError, ValueError, tk.TclError) as exc:
+            # une exception levée dans un callback Tk serait invisible pour
+            # l'utilisateur : on journalise et on garde l'image précédente
+            logger.warning("Affichage de l'image %s impossible: %s", idx, exc)
+            return
         # avoid garbage collection
         self.tk_images[idx] = tk_img
         self.image_label.configure(image=tk_img)
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    if MISSING_DEPENDENCIES:
+        message = (
+            "Dépendances manquantes : "
+            + ", ".join(MISSING_DEPENDENCIES)
+            + ".\nInstallez-les via : pip install -r requirements.txt"
+        )
+        logger.error(message)
+        messagebox.showerror("Dépendance manquante", message)
+        return 1
+
     try:
-        import requests  # ensure requests est disponible
-    except Exception:
-        messagebox.showerror("Dépendance manquante", "Installez la bibliothèque 'requests' et 'Pillow' via pip.")
-        return
+        ensure_images_dir()
+    except OSError as exc:
+        logger.error("%s", exc)
+        messagebox.showerror("Erreur", str(exc))
+        return 1
+
     app = RecipeApp(RECIPES)
     app.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
