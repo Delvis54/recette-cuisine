@@ -1,118 +1,23 @@
 import os
-import requests
-import io
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 from PIL import Image, ImageTk
-
-# ------------------------------------------------------------------
-# Données : 10 recettes africaines (liste de dictionnaires)
-# Chaque recette : name, country, ingredients (list), steps (list), image_url
-# ------------------------------------------------------------------
-RECIPES = [
-    {
-        "name": "Thieboudienne",
-        "country": "Sénégal",
-        "ingredients": [
-            "Riz", "Poisson (grouper ou similaire)", "Tomates", "Oignons", "Huile", "Carottes", "Chou"
-        ],
-        "steps": [
-            "Préparer la sauce tomate et faire cuire le poisson.",
-            "Faire mijoter les légumes dans la sauce.",
-            "Ajouter le riz et cuire jusqu'à absorption.",
-        ],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/3/30/Ceebu_jenn_-_thiebou_djenn.jpg"
-    },
-    {
-        "name": "Yassa au poulet",
-        "country": "Sénégal",
-        "ingredients": ["Poulet", "Oignons", "Citron", "Moutarde", "Huile", "Piment (facultatif)"],
-        "steps": ["Mariner le poulet au citron et oignons.", "Faire dorer puis mijoter jusqu'à tendreté."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/1/16/Poulet_yassa.jpg"
-    },
-    {
-        "name": "Mafé",
-        "country": "Mali / Sénégal",
-        "ingredients": ["Viande ou poulet", "Beurre de cacahuète", "Tomates", "Oignons", "Légumes"],
-        "steps": ["Préparer la sauce à la cacahuète.", "Cuire la viande puis mijoter dans la sauce.", "Servir avec du riz."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/6/66/Mafe.jpg"
-    },
-    {
-        "name": "Attiéké",
-        "country": "Côte d'Ivoire",
-        "ingredients": ["Attiéké (manioc)", "Poisson ou viande", "Légumes", "Tomates"],
-        "steps": ["Réchauffer l'attiéké à la vapeur.", "Servir avec poisson frit et salade."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/1/18/Attieke.jpg"
-    },
-    {
-        "name": "Jollof Rice",
-        "country": "Afrique de l'Ouest",
-        "ingredients": ["Riz", "Tomates", "Oignons", "Épices", "Huile"],
-        "steps": ["Préparer une base tomate-épicée.", "Cuire le riz dans la sauce jusqu'à absorption."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/8/8b/Jollof_rice_and_chicken.jpg"
-    },
-    {
-        "name": "Egusi",
-        "country": "Nigeria",
-        "ingredients": ["Farine d'egusi (graines)", "Légumes feuille", "Viande ou poisson", "Huile"],
-        "steps": ["Préparer la pâte d'egusi.", "Cuire avec légumes et protéines."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/4/49/Egusi_Soup.jpg"
-    },
-    {
-        "name": "Tagine d'agneau",
-        "country": "Maroc",
-        "ingredients": ["Agneau", "Épices (ras el hanout)", "Fruits secs", "Légumes"],
-        "steps": ["Saisir la viande, ajouter épices et liquide.", "Mijoter lentement jusqu'à tendreté."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/2/28/Tagine.jpg"
-    },
-    {
-        "name": "Bunny Chow",
-        "country": "Afrique du Sud",
-        "ingredients": ["Pain troué", "Curry (agneau ou légumes)", "Épices"],
-        "steps": ["Faire un curry épais.", "Remplir un pain évidé avec le curry."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/b/bb/Bunny_chow.jpg"
-    },
-    {
-        "name": "Doro Wat",
-        "country": "Éthiopie",
-        "ingredients": ["Poulet", "Berbere (épice)", "Oignons", "Beurre clarifié"],
-        "steps": ["Cuire longuement les oignons lentement.", "Ajouter poulet et berbere, mijoter."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/9/9b/Doro_wat.jpg"
-    },
-    {
-        "name": "Koshary",
-        "country": "Égypte",
-        "ingredients": ["Riz", "Lentilles", "Pâtes", "Sauce tomate", "Crispy onions"],
-        "steps": ["Cuire séparément riz, lentilles et pâtes.", "Assembler avec sauce tomate et oignons frits."],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/1/11/Koshary.jpg"
-    }
-]
+from recettes_common import (
+    RECIPES,
+    download_image,
+    format_ingredients,
+    format_recipe_label,
+    format_steps,
+    slugify,
+)
 
 IMAGES_DIR = os.path.join(os.path.dirname(__file__), "images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
-
-# Helpers
-
-def slugify(name: str) -> str:
-    return "".join(c for c in name.lower() if c.isalnum() or c == " ").replace(" ", "_")
 
 
 def local_image_path(recipe: dict) -> str:
     name = slugify(recipe["name"]) + ".jpg"
     return os.path.join(IMAGES_DIR, name)
-
-
-def download_image(url: str, path: str) -> bool:
-    try:
-        resp = requests.get(url, stream=True, timeout=15)
-        resp.raise_for_status()
-        with open(path, "wb") as f:
-            for chunk in resp.iter_content(1024):
-                f.write(chunk)
-        return True
-    except Exception as e:
-        print(f"Téléchargement échoué pour {url}: {e}")
-        return False
 
 
 def ensure_image(recipe: dict) -> str:
@@ -160,7 +65,7 @@ class RecipeApp(tk.Tk):
 
         self.recipe_listbox = tk.Listbox(sidebar, width=28, activestyle="none")
         for r in self.recipes:
-            self.recipe_listbox.insert(tk.END, f"{r['name']}  —  {r['country']}")
+            self.recipe_listbox.insert(tk.END, format_recipe_label(r))
         self.recipe_listbox.pack(fill="y", expand=True, padx=6, pady=6)
         self.recipe_listbox.bind("<<ListboxSelect>>", self._on_select)
 
@@ -217,15 +122,17 @@ class RecipeApp(tk.Tk):
         # ingrédients
         self.ing_text.configure(state="normal")
         self.ing_text.delete("1.0", tk.END)
-        for ing in r.get("ingredients", []):
-            self.ing_text.insert(tk.END, "• " + ing + "\n")
+        ingredients = format_ingredients(r.get("ingredients", []))
+        if ingredients:
+            self.ing_text.insert(tk.END, ingredients + "\n")
         self.ing_text.configure(state="disabled")
 
         # préparation
         self.prep_text.configure(state="normal")
         self.prep_text.delete("1.0", tk.END)
-        for i, step in enumerate(r.get("steps", []), 1):
-            self.prep_text.insert(tk.END, f"{i}. {step}\n\n")
+        steps = format_steps(r.get("steps", []))
+        if steps:
+            self.prep_text.insert(tk.END, steps + "\n\n")
         self.prep_text.configure(state="disabled")
 
         # image
@@ -250,11 +157,6 @@ class RecipeApp(tk.Tk):
 
 
 def main():
-    try:
-        import requests  # ensure requests est disponible
-    except Exception:
-        messagebox.showerror("Dépendance manquante", "Installez la bibliothèque 'requests' et 'Pillow' via pip.")
-        return
     app = RecipeApp(RECIPES)
     app.mainloop()
 

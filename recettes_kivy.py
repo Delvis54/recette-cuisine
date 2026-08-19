@@ -8,25 +8,16 @@ from kivy.uix.image import AsyncImage
 from kivy.clock import mainthread
 from kivy.core.window import Window
 import os
-import requests
 import threading
 from urllib.parse import urlparse
 
-# Minimal copy of recipes (keeps file self-contained)
-RECIPES = [
-    {
-        "name": "Thieboudienne",
-        "country": "Sénégal",
-        "ingredients": ["Riz", "Poisson (grouper ou similaire)", "Tomates", "Oignons", "Huile", "Carottes", "Chou"],
-        "steps": [
-            "Préparer la sauce tomate et faire cuire le poisson.",
-            "Faire mijoter les légumes dans la sauce.",
-            "Ajouter le riz et cuire jusqu'à absorption.",
-        ],
-        "image_url": "https://upload.wikimedia.org/wikipedia/commons/3/30/Ceebu_jenn_-_thiebou_djenn.jpg",
-    },
-    # ... (truncated for brevity in prototype) copy the rest as needed
-]
+from recettes_common import (
+    RECIPES,
+    download_image,
+    format_ingredients,
+    format_recipe_label,
+    format_steps,
+)
 
 
 class RecipeList(GridLayout):
@@ -36,7 +27,7 @@ class RecipeList(GridLayout):
         self.recipes = recipes
         self.select_callback = select_callback
         for i, r in enumerate(self.recipes):
-            text = f"{r['name']}  —  {r['country']}"
+            text = format_recipe_label(r)
             btn = Button(text=text, size_hint_y=None, height=44)
             btn.recipe_index = i
             btn.bind(on_release=self._on_press)
@@ -54,21 +45,18 @@ class DetailView(BoxLayout):
         self.add_widget(self.image)
 
         self.ing_label = Label(text='', halign='left', valign='top')
-        self.ing_label.bind(size=self._update_ing_text_size)
+        self.ing_label.bind(size=self._update_text_size)
         ing_scroll = ScrollView()
         ing_scroll.add_widget(self.ing_label)
         self.add_widget(ing_scroll)
 
         self.steps_label = Label(text='', halign='left', valign='top')
-        self.steps_label.bind(size=self._update_steps_text_size)
+        self.steps_label.bind(size=self._update_text_size)
         steps_scroll = ScrollView(size_hint_y=0.6)
         steps_scroll.add_widget(self.steps_label)
         self.add_widget(steps_scroll)
 
-    def _update_ing_text_size(self, instance, value):
-        instance.text_size = (instance.width, None)
-
-    def _update_steps_text_size(self, instance, value):
+    def _update_text_size(self, instance, value):
         instance.text_size = (instance.width, None)
 
     @mainthread
@@ -88,10 +76,10 @@ class DetailView(BoxLayout):
         else:
             self.image.source = img_url
 
-        ing = '\n'.join(f'• {i}' for i in recipe.get('ingredients', []))
+        ing = format_ingredients(recipe.get('ingredients', []))
         self.ing_label.text = '[b]Ingrédients[/b]\n' + ing
 
-        steps = '\n\n'.join(f"{i+1}. {s}" for i, s in enumerate(recipe.get('steps', [])))
+        steps = format_steps(recipe.get('steps', []))
         self.steps_label.text = '[b]Préparation[/b]\n' + steps
 
 
@@ -155,8 +143,6 @@ class ImageCache:
 
         if os.path.exists(local_path):
             # immediate callback on main thread
-            from kivy.clock import mainthread
-
             @mainthread
             def _cb():
                 callback(local_path)
@@ -166,28 +152,13 @@ class ImageCache:
 
         # otherwise download in background
         def _download():
-            try:
-                resp = requests.get(url, stream=True, timeout=20)
-                resp.raise_for_status()
-                with open(local_path + '.tmp', 'wb') as f:
-                    for chunk in resp.iter_content(1024):
-                        f.write(chunk)
-                os.replace(local_path + '.tmp', local_path)
-                from kivy.clock import mainthread
+            ok = download_image(url, local_path)
 
-                @mainthread
-                def _cb():
-                    callback(local_path)
+            @mainthread
+            def _cb():
+                callback(local_path if ok else None)
 
-                _cb()
-            except Exception:
-                from kivy.clock import mainthread
-
-                @mainthread
-                def _cb():
-                    callback(None)
-
-                _cb()
+            _cb()
 
         threading.Thread(target=_download, daemon=True).start()
 
