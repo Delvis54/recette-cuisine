@@ -1,6 +1,7 @@
 import os
 import requests
 import io
+from urllib.parse import urlparse
 import tkinter as tk
 from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
@@ -91,6 +92,12 @@ RECIPES = [
 IMAGES_DIR = os.path.join(os.path.dirname(__file__), "images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
+ALLOWED_URL_SCHEMES = ("http", "https")
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+# Limite le nombre de pixels décodés (protection contre les "decompression bombs")
+Image.MAX_IMAGE_PIXELS = 50_000_000
+
 # Helpers
 
 def slugify(name: str) -> str:
@@ -102,15 +109,36 @@ def local_image_path(recipe: dict) -> str:
     return os.path.join(IMAGES_DIR, name)
 
 
+def is_allowed_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in ALLOWED_URL_SCHEMES and bool(parsed.netloc)
+
+
 def download_image(url: str, path: str) -> bool:
+    if not is_allowed_url(url):
+        print(f"URL refusée (schéma non autorisé) : {url}")
+        return False
+    tmp_path = path + ".tmp"
     try:
         resp = requests.get(url, stream=True, timeout=15)
         resp.raise_for_status()
-        with open(path, "wb") as f:
-            for chunk in resp.iter_content(1024):
+        if not is_allowed_url(resp.url):
+            raise ValueError(f"redirection vers une URL non autorisée : {resp.url}")
+        content_type = resp.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            raise ValueError(f"type de contenu inattendu : {content_type!r}")
+        written = 0
+        with open(tmp_path, "wb") as f:
+            for chunk in resp.iter_content(8192):
+                written += len(chunk)
+                if written > MAX_IMAGE_BYTES:
+                    raise ValueError("image trop volumineuse")
                 f.write(chunk)
+        os.replace(tmp_path, path)
         return True
     except Exception as e:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
         print(f"Téléchargement échoué pour {url}: {e}")
         return False
 

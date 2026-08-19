@@ -7,10 +7,20 @@ from kivy.uix.label import Label
 from kivy.uix.image import AsyncImage
 from kivy.clock import mainthread
 from kivy.core.window import Window
+import hashlib
 import os
 import requests
 import threading
 from urllib.parse import urlparse
+
+ALLOWED_URL_SCHEMES = ('http', 'https')
+ALLOWED_IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def is_allowed_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in ALLOWED_URL_SCHEMES and bool(parsed.netloc)
 
 # Minimal copy of recipes (keeps file self-contained)
 RECIPES = [
@@ -140,13 +150,25 @@ class ImageCache:
         os.makedirs(self.base_dir, exist_ok=True)
 
     def _filename_for_url(self, url: str) -> str:
-        parsed = urlparse(url)
-        name = os.path.basename(parsed.path)
-        if not name:
-            name = 'img'
-        return name
+        """Nom de fichier dérivé d'un hash de l'URL : ne contient jamais de
+        séparateur de chemin ni de composant de traversal fourni par l'URL.
+        """
+        ext = os.path.splitext(urlparse(url).path)[1].lower()
+        if ext not in ALLOWED_IMAGE_EXTS:
+            ext = '.jpg'
+        return hashlib.sha256(url.encode('utf-8')).hexdigest() + ext
 
     def get_image(self, url: str, callback):
+        if not is_allowed_url(url):
+            from kivy.clock import mainthread
+
+            @mainthread
+            def _cb():
+                callback(None)
+
+            _cb()
+            return
+
         # compute local path
         fname = self._filename_for_url(url)
         local_dir = os.path.join(self.base_dir, 'images')
@@ -169,8 +191,17 @@ class ImageCache:
             try:
                 resp = requests.get(url, stream=True, timeout=20)
                 resp.raise_for_status()
+                if not is_allowed_url(resp.url):
+                    raise ValueError(f'redirection non autorisée : {resp.url}')
+                content_type = resp.headers.get('Content-Type', '')
+                if not content_type.startswith('image/'):
+                    raise ValueError(f'type de contenu inattendu : {content_type!r}')
+                written = 0
                 with open(local_path + '.tmp', 'wb') as f:
-                    for chunk in resp.iter_content(1024):
+                    for chunk in resp.iter_content(8192):
+                        written += len(chunk)
+                        if written > MAX_IMAGE_BYTES:
+                            raise ValueError('image trop volumineuse')
                         f.write(chunk)
                 os.replace(local_path + '.tmp', local_path)
                 from kivy.clock import mainthread
@@ -181,6 +212,9 @@ class ImageCache:
 
                 _cb()
             except Exception:
+                if os.path.exists(local_path + '.tmp'):
+                    os.remove(local_path + '.tmp')
+
                 from kivy.clock import mainthread
 
                 @mainthread
