@@ -31,7 +31,8 @@ RECIPES = [
 
 class RecipeList(GridLayout):
     def __init__(self, recipes, select_callback, **kwargs):
-        super().__init__(cols=1, spacing=6, size_hint_y=None, **kwargs)
+        kwargs.setdefault('size_hint_y', None)
+        super().__init__(cols=1, spacing=6, **kwargs)
         self.bind(minimum_height=self.setter('height'))
         self.recipes = recipes
         self.select_callback = select_callback
